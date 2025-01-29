@@ -193,7 +193,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
+uint32_t i = 5;
 /* USER CODE END 4 */
 
 /**
