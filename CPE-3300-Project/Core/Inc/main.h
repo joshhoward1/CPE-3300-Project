@@ -57,14 +57,14 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define RX_Pin GPIO_PIN_0
-#define RX_GPIO_Port GPIOA
 #define IDLE_Pin GPIO_PIN_1
 #define IDLE_GPIO_Port GPIOA
 #define BUSY_Pin GPIO_PIN_4
 #define BUSY_GPIO_Port GPIOA
 #define COL_Pin GPIO_PIN_5
 #define COL_GPIO_Port GPIOA
+#define RX_Pin GPIO_PIN_8
+#define RX_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 
