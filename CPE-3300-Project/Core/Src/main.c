@@ -139,12 +139,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 192;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 4;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -154,7 +149,7 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
@@ -187,7 +182,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 41;
+  htim1.Init.Prescaler = 15;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 65535;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -286,7 +281,12 @@ static void MX_GPIO_Init(void)
  *
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
+	HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_2);
 	state = BUSY;
+
+	HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_RESET);
+	HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_RESET);
+	//all_leds_off();
 
 	uint32_t timestamp = 0;
 	uint32_t TOC_compare_value = 0;
@@ -304,6 +304,13 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
 		// Reset timer counter before starting output compare
 		__HAL_TIM_SET_COUNTER(htim, 0);
 
+		// Check if TOC interrupt flag is pending
+		// If it is, clear it.
+		if (__HAL_TIM_GET_FLAG(htim, TIM_FLAG_CC2)) {
+			__HAL_TIM_CLEAR_FLAG(htim, TIM_FLAG_CC2);
+		}
+
+		// Start TOC
 		HAL_TIM_OC_Start_IT(htim, TIM_CHANNEL_2);
 	}
 }
@@ -315,7 +322,7 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 	line_level = HAL_GPIO_ReadPin(RX_GPIO_Port, RX_Pin);
 
 
-	if (htim->Instance == TIM2 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2) {
+	if (htim->Instance == TIM1 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2) {
 		if (line_level == GPIO_PIN_SET) { // voltage is high
 			state = IDLE;
 			HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_SET);
@@ -324,6 +331,8 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 			HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_SET);
 		}
 	}
+
+	//HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
 }
 
 void all_leds_off() {
