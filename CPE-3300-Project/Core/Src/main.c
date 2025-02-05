@@ -43,17 +43,23 @@
 TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN PV */
+// typedef enum containing the tree states of receiver
+// IDLE: logic high triggered after timeout (1.11ms)
+// COL: logic out triggered after timeout (1.11ms)
+// BUSY: logic high or low and within timeout treshold still (1.11ms)
+
 typedef enum {
 	IDLE,
 	BUSY,
 	COL
 } channel_state_t;
 
+// state variable holding the current state based on our custom enum type
 volatile channel_state_t state;
 
-volatile GPIO_PinState line_level;
-volatile uint32_t TOC_compare_value;
-volatile uint32_t timestamp;
+volatile GPIO_PinState line_level; // RX pin voltage level
+volatile uint32_t TOC_compare_value; // 1.11ms offset from tic value (tic should be ideally 0)
+volatile uint32_t timestamp; // offset from entering the tic ISR to reading the tic value
 
 /* USER CODE END PV */
 
@@ -103,8 +109,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
   // Set channel_state to IDLE to start
-  state = IDLE;
-  HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_SET);
+  state = IDLE; // Initialize the state of our machine to IDLE before receiving
+  HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_SET); // Setting IDLE LED to on
 
   // start input capture timer
   HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
@@ -283,35 +289,34 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 /**
- *
+ *                    CHANNEL MONITOR
+ * Entered any time we detect an edge on the RX pin.
+ * Records the tic timestamp immediately to avoid offset from running code
+ * Writes the BUSY led value to be on, also changes the state variable to BUSY
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
-	// Read TIC captured value first thing to reset counter
-	// This reduces the delay that running code in between would add.
-	timestamp = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
-
-	// Stop output compare before resetting it
-	HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_2);
-
-	// State always equals busy after we see a rising edge
-	state = BUSY;
-
-	HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_RESET);
-	HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_RESET);
-
-	HAL_GPIO_WritePin(BUSY_GPIO_Port, BUSY_Pin, GPIO_PIN_SET);
-
-	timestamp = 0;
-	TOC_compare_value = 0;
-
-
-
+	// Verifies that the correct timer and channel are active
 	if (htim->Instance == TIM1 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
-		// Get timestamp of edge occurrence
-		//timestamp = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+		// Read TIC captured value first thing to reset counter
+		// This reduces the delay that running code in between would add.
+		timestamp = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
-		//difference =
-		// Take timestamp plus 1.11ms
+		// Stop output compare before resetting it
+		HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_2);
+
+		// State always equals busy after we see a rising edge
+		state = BUSY;
+
+		// Turns off IDLE and COL leds
+		HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_RESET);
+		HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_RESET);
+
+		// Set the BUSY led to on
+		HAL_GPIO_WritePin(BUSY_GPIO_Port, BUSY_Pin, GPIO_PIN_SET);
+
+		timestamp = 0;
+		TOC_compare_value = 0;
+
 		TOC_compare_value = timestamp + DELAY_WITH_TOLERANCE;
 
 		// Set up the TOC capture-compare value
@@ -331,13 +336,24 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
 	}
 }
 
+/**
+ *                    CHANNEL MONITOR
+ * Triggers when there is a timeout of 1.11ms
+ * This signifies that we are no longer in BUSY (IDLE or COL)
+ *
+ * IMPORTANT NOTE:
+ * If IC is triggered while in this interrupt, we think it should be
+ * "lined up" waiting to trigger, so if there was an edge detected while
+ * in this loop, ideally, our system would "remember" to change it as soon
+ * as we leave this OC
+ */
 void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 	all_leds_off();
 
 	// Read pin value
 	line_level = HAL_GPIO_ReadPin(RX_GPIO_Port, RX_Pin);
 
-
+	// Checking the current logic level to determine if IDLE (1) or COL (0)
 	if (htim->Instance == TIM1 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_2) {
 		if (line_level == GPIO_PIN_SET) { // voltage is high
 			state = IDLE;
@@ -351,6 +367,7 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 	//HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
 }
 
+// goes through and sets all pins to logic 0
 void all_leds_off() {
 	HAL_GPIO_WritePin(BUSY_GPIO_Port, BUSY_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_RESET);
