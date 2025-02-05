@@ -2,17 +2,11 @@
 /**
   ******************************************************************************
   * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
+  * @brief          : Main program body - CPE 3300 Networking Project
   *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
+  * Milestones:
+  * 	1. Channel Monitor - COMPLETE
+  * 	2. Transmitter
   ******************************************************************************
   */
 /* USER CODE END Header */
@@ -43,11 +37,12 @@
 TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN PV */
-// typedef enum containing the tree states of receiver
+
+
+// RX Channel States
 // IDLE: logic high triggered after timeout (1.11ms)
 // COL: logic out triggered after timeout (1.11ms)
-// BUSY: logic high or low and within timeout treshold still (1.11ms)
-
+// BUSY: logic high or low and within timeout threshold (1.11ms)
 typedef enum {
 	IDLE,
 	BUSY,
@@ -57,6 +52,7 @@ typedef enum {
 // state variable holding the current state based on our custom enum type
 volatile channel_state_t state;
 
+// These variables are only temporarily global to watch in the debugging window
 volatile GPIO_PinState line_level; // RX pin voltage level
 volatile uint32_t TOC_compare_value; // 1.11ms offset from tic value (tic should be ideally 0)
 volatile uint32_t timestamp; // offset from entering the tic ISR to reading the tic value
@@ -289,10 +285,14 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 /**
- *                    CHANNEL MONITOR
+ *                Milestone 1:  CHANNEL MONITOR
+ * TIM1 Input Capture ISR Callback Function
+ *
  * Entered any time we detect an edge on the RX pin.
  * Records the tic timestamp immediately to avoid offset from running code
  * Writes the BUSY led value to be on, also changes the state variable to BUSY
+ * Starts an output capture event that will end exactly
+ * 1.11ms after the edge was detected
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
 	// Verifies that the correct timer and channel are active
@@ -337,15 +337,15 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
 }
 
 /**
- *                    CHANNEL MONITOR
+ *                    Milestone 1: CHANNEL MONITOR
  * Triggers when there is a timeout of 1.11ms
  * This signifies that we are no longer in BUSY (IDLE or COL)
  *
  * IMPORTANT NOTE:
- * If IC is triggered while in this interrupt, we think it should be
- * "lined up" waiting to trigger, so if there was an edge detected while
- * in this loop, ideally, our system would "remember" to change it as soon
- * as we leave this OC
+ * If IC is triggered while in this interrupt, it will be pending and
+ * waiting to trigger, so if there was an edge detected while
+ * in this loop, ideally, our system will trigger the TIC ISR immediately
+ * after exiting this function
  */
 void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 	all_leds_off();
@@ -363,8 +363,6 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 			HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_SET);
 		}
 	}
-
-	//HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
 }
 
 // goes through and sets all pins to logic 0
