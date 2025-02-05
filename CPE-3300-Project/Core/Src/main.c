@@ -52,6 +52,8 @@ typedef enum {
 volatile channel_state_t state;
 
 volatile GPIO_PinState line_level;
+volatile uint32_t TOC_compare_value;
+volatile uint32_t timestamp;
 
 /* USER CODE END PV */
 
@@ -100,11 +102,14 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
 
+  // Set channel_state to IDLE to start
+  state = IDLE;
+  HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_SET);
+
   // start input capture timer
   HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
 
-  // Set channel_state to IDLE to start
-  state = IDLE;
+
 
   /* USER CODE END 2 */
 
@@ -281,20 +286,31 @@ static void MX_GPIO_Init(void)
  *
  */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
+	// Read TIC captured value first thing to reset counter
+	// This reduces the delay that running code in between would add.
+	timestamp = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+
+	// Stop output compare before resetting it
 	HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_2);
+
+	// State always equals busy after we see a rising edge
 	state = BUSY;
 
 	HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_RESET);
-	//all_leds_off();
 
-	uint32_t timestamp = 0;
-	uint32_t TOC_compare_value = 0;
+	HAL_GPIO_WritePin(BUSY_GPIO_Port, BUSY_Pin, GPIO_PIN_SET);
+
+	timestamp = 0;
+	TOC_compare_value = 0;
+
+
 
 	if (htim->Instance == TIM1 && htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
 		// Get timestamp of edge occurrence
-		timestamp = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+		//timestamp = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
 
+		//difference =
 		// Take timestamp plus 1.11ms
 		TOC_compare_value = timestamp + DELAY_WITH_TOLERANCE;
 
