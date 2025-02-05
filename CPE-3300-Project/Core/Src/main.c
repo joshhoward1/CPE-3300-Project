@@ -314,16 +314,10 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
 		// Set the BUSY led to on
 		HAL_GPIO_WritePin(BUSY_GPIO_Port, BUSY_Pin, GPIO_PIN_SET);
 
-		timestamp = 0;
-		TOC_compare_value = 0;
-
 		TOC_compare_value = timestamp + DELAY_WITH_TOLERANCE;
 
 		// Set up the TOC capture-compare value
 		__HAL_TIM_SET_COMPARE(htim, TIM_CHANNEL_2, TOC_compare_value);
-
-		// Reset timer counter before starting output compare
-		__HAL_TIM_SET_COUNTER(htim, 0);
 
 		// Check if TOC interrupt flag is pending
 		// If it is, clear it.
