@@ -65,6 +65,8 @@ void Error_Handler(void);
 #define COL_GPIO_Port GPIOA
 #define RX_Pin GPIO_PIN_8
 #define RX_GPIO_Port GPIOA
+#define TX_Pin GPIO_PIN_5
+#define TX_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
