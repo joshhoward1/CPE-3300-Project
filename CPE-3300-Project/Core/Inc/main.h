@@ -63,6 +63,8 @@ void Error_Handler(void);
 #define BUSY_GPIO_Port GPIOA
 #define COL_Pin GPIO_PIN_5
 #define COL_GPIO_Port GPIOA
+#define ISR_Pin GPIO_PIN_6
+#define ISR_GPIO_Port GPIOA
 #define RX_Pin GPIO_PIN_8
 #define RX_GPIO_Port GPIOA
 #define TX_Pin GPIO_PIN_5

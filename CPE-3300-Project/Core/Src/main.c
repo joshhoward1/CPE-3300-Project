@@ -28,10 +28,13 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-// Timeout period of 1.11ms
+// Timeout period of 1.11ms for channel monitor
 #define DELAY_WITH_TOLERANCE 1110
 
-// max tx buffer size
+#define TOLERANCE 0.0132  // +-1.32% tolerance for 1000bps RX
+#define MONITOR_TIMEOUT 3000  // 10ms timeout before switching back to command mode
+
+// max tx and rx buffer size
 #define MAX_SIZE 256
 
 // Define wait between transmitter edges in microseconds
@@ -72,16 +75,39 @@ volatile channel_state_t state;
 
 // These variables are only temporarily global to watch in the debugging window
 volatile GPIO_PinState line_level; // RX pin voltage level
-volatile uint32_t TOC_compare_value; // 1.11ms offset from tic value (tic should be ideally 0)
-volatile uint32_t timestamp; // offset from entering the tic ISR to reading the tic value
+volatile uint16_t TOC_compare_value; // 1.11ms offset from tic value (tic should be ideally 0)
+volatile uint16_t timestamp; // offset from entering the tic ISR to reading the tic value
 
+// TX Variables
 uint8_t tx_buffer[MAX_SIZE];
 uint8_t tx_index = 0; // Character index in buffer
 uint8_t bit_index = 0; // Current bit we are sending of current char
 bool is_transmitting = false;
 uint32_t edge_count = 0; // keep track of in TOC ISR to figure out send behavior
-
 bool repeat_mode = false;
+
+// RX Variables
+
+// Timing Variables
+volatile uint16_t last_capture = 0;
+volatile uint32_t period = 0;
+volatile int bit_state = 0;
+
+// Decoded RX Message Buffer
+volatile char received_message[MAX_SIZE];
+volatile int received_index = 0;
+
+// UART Input Buffer
+char uart_rx_buffer[MAX_SIZE];
+volatile int uart_rx_ready = 0;
+// Tracks if new data arrived. If so, update the console
+volatile int new_data_received = 0;
+char user_input[MAX_SIZE];
+
+// Monitor Mode Timer
+volatile uint32_t last_data_time = 0;
+volatile int monitor_mode_active = 0;
+volatile int tx_mode_active = 0;
 
 /* USER CODE END PV */
 
@@ -93,6 +119,10 @@ static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void all_leds_off();
 void handle_input();
+void process_UART_command(char *input);
+void decode_bit(uint32_t pulse_width, bool initial_bit);
+void print_new_data();
+void strip_newline(char *str);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -155,22 +185,56 @@ int main(void)
   // start input capture timer
   HAL_TIM_IC_Start_IT(&htim1, TIM_CHANNEL_1);
 
+  // Ready the UART interrupt
+ // HAL_UART_Receive_IT(&huart2, (uint8_t*)uart_rx_buffer, MAX_SIZE);
+
+  // user input for command window
+  //char user_input[MAX_SIZE];
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  //printf("Enter chars: ");
+
   while (1)
   {
-	  // Milestone 2 for demo purposes
-	  printf("Enter input: ");
-	  scanf("%s", tx_buffer);
+	  if (!monitor_mode_active && !tx_mode_active) {
+		  // Blocking fgets() in command mode
+		  printf("> ");
+		  fflush(stdout);
+		  scanf("%s", user_input);
+		  //fgets(user_input, MAX_SIZE, stdin);
+		  strip_newline(user_input);
+		  process_UART_command(user_input);
+	  } else if (monitor_mode_active && !tx_mode_active) {
+		  // Monitor mode: Non-blocking display of new data
+		  if (new_data_received) {
+			  print_new_data();
+		  }
 
-	  // If ready to initialize TX, check that state is not BUSY or COL
-	  if (state != BUSY && state != COL) {
-		  handle_input();
+		  // Check if 10ms have passed with no new data
+		  // if so, console gives control back to user
+		  if (HAL_GetTick() - last_data_time > MONITOR_TIMEOUT) {
+			  monitor_mode_active = 0;
+			  printf("Switching back to command mode.\n");
+		  }
+	  } else if (tx_mode_active && !monitor_mode_active) {
+		  printf("Type something to TX pin: ");
+		  scanf("%s", tx_buffer);
+		  // If ready to initialize TX, check that state is not BUSY or COL
+		  if (state != BUSY && state != COL) {
+			  handle_input();
+		  }
+		  tx_mode_active = 0;
 	  }
+	  // Milestone 2 for demo purposes
+//	  printf("Enter input: ");
+//	  scanf("%s", tx_buffer);
+//
+//	  // If ready to initialize TX, check that state is not BUSY or COL
+//	  if (state != BUSY && state != COL) {
+//		  handle_input();
+//	  }
 
 
     /* USER CODE END WHILE */
@@ -362,13 +426,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, IDLE_Pin|BUSY_Pin|COL_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, IDLE_Pin|BUSY_Pin|COL_Pin|ISR_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(TX_GPIO_Port, TX_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pins : IDLE_Pin BUSY_Pin COL_Pin */
-  GPIO_InitStruct.Pin = IDLE_Pin|BUSY_Pin|COL_Pin;
+  /*Configure GPIO pins : IDLE_Pin BUSY_Pin COL_Pin ISR_Pin */
+  GPIO_InitStruct.Pin = IDLE_Pin|BUSY_Pin|COL_Pin|ISR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
@@ -402,7 +466,23 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
 		// Read TIC captured value first thing to reset counter
 		// This reduces the delay that running code in between would add.
 		timestamp = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+//		HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_SET);
+		uint16_t pulse_width;
+		/**
+		 * RX Behavior
+		 */
+		bool initial_bit = false;
+		if (state == IDLE) {
+			initial_bit = true;
+		}
+		pulse_width = timestamp - last_capture;
+		last_capture = timestamp;
 
+		decode_bit(pulse_width, initial_bit); // figure out if 1T or 2T has passed
+
+		/**
+		 * Channel monitor behavior
+		 */
 		// Stop output compare before resetting it
 		HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_2);
 
@@ -429,8 +509,10 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef* htim) {
 
 		// Start TOC
 		HAL_TIM_OC_Start_IT(htim, TIM_CHANNEL_2);
+//		HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_RESET);
 	}
 }
+
 
 /**
  *                    Milestone 1: CHANNEL MONITOR
@@ -514,11 +596,50 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 	}
 }
 
+//// UART Interrupt Callback
+//void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+//    if (huart->Instance == USART2) {
+//        uart_rx_ready = 1;  // Signal main loop that a command is ready
+//        // Restart interrupt
+//        HAL_UART_Receive_IT(&huart2, (uint8_t*)uart_rx_buffer, MAX_SIZE);
+//    }
+//}
+
 // goes through and sets all pins to logic 0
 void all_leds_off() {
 	HAL_GPIO_WritePin(BUSY_GPIO_Port, BUSY_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_RESET);
 	HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_RESET);
+}
+
+// Processes Console Input
+void process_UART_command(char *input) {
+    if (strcmp(input, "r") == 0) {
+        print_new_data();
+        monitor_mode_active = 0;
+        tx_mode_active = 0;
+    } else if (strcmp(input, "monitor") == 0) {
+        monitor_mode_active = 1;
+        tx_mode_active = 0;
+        printf("Monitor mode activated.\n");
+    } else if (strcmp(input, "command") == 0) {
+        monitor_mode_active = 0;
+        tx_mode_active = 0;
+        printf("Command mode activated.\n");
+    } else if (strcmp(input, "tx") == 0) {
+    	tx_mode_active = 1;
+    	monitor_mode_active = 0;
+    }
+}
+
+// Prints only new data received
+void print_new_data() {
+    if (new_data_received) {
+        printf("Received: %s\n", received_message);
+        new_data_received = 0;  // Clear flag
+        received_message[0] = '\0';
+        received_index = 0;
+    }
 }
 
 // handles starting the OC when a character is received
@@ -537,6 +658,70 @@ void handle_input() {
 				__HAL_TIM_GET_COUNTER(&htim1) + TX_WAIT);
 		HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_3);
 	}
+}
+
+// Remove trailing '\r' or '\n' if present
+void strip_newline(char *str) {
+    size_t len = strlen(str);
+    if (len > 0 && (str[len - 1] == '\n' || str[len - 1] == '\r')) {
+        str[len - 1] = '\0';  // Replace it with null terminator
+    }
+}
+
+// Decodes Manchester signal timing
+void decode_bit(uint32_t pulse_width, bool initial_bit) {
+
+	// Store received bit in buffer
+	static uint8_t bit_counter = 0;
+	static uint8_t byte_buffer = 0;
+	static uint8_t one_t_counter = 0;
+
+	if (initial_bit == true) {
+		bit_state = 0;
+		// Shift byte to the left and append bit at LSB
+		byte_buffer = ((byte_buffer << 1) | bit_state);
+		bit_counter++;
+		return;
+	}
+
+    if ((pulse_width > 900) && (pulse_width < 1100)) {
+    	HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_SET);
+        // Detected 2T period: Bit flip
+        bit_state = !bit_state;
+        one_t_counter = 0;
+    } else if ((pulse_width > 400) && (pulse_width < 600)) {
+    	// else, bit is the same as last period
+    	++one_t_counter;
+    	if (one_t_counter == 1) {
+    		return;
+    	}
+	} else {
+		return;
+	}
+
+
+    // Shift byte to the left and append bit at LSB
+    byte_buffer = ((byte_buffer << 1) | bit_state);
+    bit_counter++;
+
+    one_t_counter = 0;
+
+    if (bit_counter == 8) {
+        // Store completed byte
+        received_message[received_index++] = byte_buffer;
+        received_message[received_index] = '\0';  // Null terminate string
+        bit_counter = 0;
+        byte_buffer = 0;
+        new_data_received = 1;  // Flag new data
+        last_data_time = HAL_GetTick();  // Reset monitor timeout timer
+
+        // Prevent buffer overflow
+        if (received_index >= MAX_SIZE - 1) {
+        	received_index = 0;
+        }
+
+    }
+    HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_RESET);
 }
 /* USER CODE END 4 */
 
