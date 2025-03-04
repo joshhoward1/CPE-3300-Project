@@ -117,6 +117,7 @@ volatile bool was_backoff = false;
 volatile bool pull_to_idle = false;
 volatile uint32_t start_time = 0;
 volatile uint32_t end_time = 0;
+volatile bool initiate_backoff = false;
 
 // RX Variables
 
@@ -124,6 +125,9 @@ volatile uint32_t end_time = 0;
 volatile uint16_t last_capture = 0;
 volatile uint32_t period = 0;
 volatile int bit_state = 0;
+volatile uint8_t bit_counter = 0;
+volatile uint8_t byte_buffer = 0;
+volatile uint8_t one_t_counter = 0;
 // Decoded RX Message Buffer
 char received_message[MAX_SIZE];
 volatile int received_index = 0;
@@ -289,49 +293,11 @@ int main(void)
 		  if (was_backoff) {
 			  printf("--> Message send failed after %u attempts\n",
 					  MAX_BACKOFFS);
-			  printf("Backed off and attempted retransmissions over %u ms\n", end_time - start_time);
 		  } else {
 			  printf("--> Message sent\n");
 		  }
 		  was_backoff = false;
 	  }
-
-
-
-
-//	  if (!monitor_mode_active && !tx_mode_active) {
-//
-//	  }
-//	  } else if (monitor_mode_active && !tx_mode_active) {
-//		  // Monitor mode: Non-blocking display of new data
-//		  if (new_data_received) {
-//			  print_new_data();
-//		  }
-//
-//		  // Check if 10ms have passed with no new data
-//		  // if so, console gives control back to user
-//		  if (HAL_GetTick() - last_data_time > MONITOR_TIMEOUT) {
-//			  monitor_mode_active = 0;
-//			  printf("Switching back to command mode.\n");
-//		  }
-//	  } else if (tx_mode_active && !monitor_mode_active) {
-//		  printf("Type something to TX pin: ");
-//		  scanf("%s", tx_buffer);
-//		  // If ready to initialize TX, check that state is not BUSY or COL
-//		  if (state != BUSY && state != COL) {
-//			  handle_input();
-//		  }
-//		  tx_mode_active = 0;
-//	  }
-	  // Milestone 2 for demo purposes
-//	  printf("Enter input: ");
-//	  scanf("%s", tx_buffer);
-//
-//	  // If ready to initialize TX, check that state is not BUSY or COL
-//	  if (state != BUSY && state != COL) {
-//		  handle_input();
-//	  }
-
 
     /* USER CODE END WHILE */
 
@@ -636,12 +602,53 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 		// Checking the current logic level to determine if IDLE (1) or COL (0)
 		line_level = HAL_GPIO_ReadPin(RX_GPIO_Port, RX_Pin);
 
+
+		// STATE == IDLE
 		if (line_level == GPIO_PIN_SET) { // voltage is high
+			prev_state = state;
 			state = IDLE;
 			HAL_GPIO_WritePin(IDLE_GPIO_Port, IDLE_Pin, GPIO_PIN_SET);
+
+			// Transition from COL->IDLE
+			if (initiate_backoff == true) {
+				is_transmitting = true; // Attempting retransmission
+				schedule_backoff();
+				initiate_backoff = false;
+			}
+
+		// STATE == COLLISION
 		} else if (line_level == GPIO_PIN_RESET) { // voltage is low
+			prev_state = state;
 			state = COL;
 			HAL_GPIO_WritePin(COL_GPIO_Port, COL_Pin, GPIO_PIN_SET);
+
+			if (is_transmitting == true) {
+				// Drive TX line high
+				HAL_GPIO_WritePin(TX_GPIO_Port, TX_Pin, GPIO_PIN_SET);
+
+				// Immediately stop transmitting
+				HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_3);
+
+				// Reset receive parameters
+				bit_counter = 0;
+				byte_buffer = 0;
+				one_t_counter = 0;
+				received_index = 0;
+//				for (uint16_t i = 0; i < sizeof(received_message); ++i) {
+//					received_message[i] = 0;
+//				}
+
+				// Reset transmit parameters
+				num_backoffs = 0;
+				tx_index = 0;
+				edge_count = 0;
+				bit_index = 0;
+
+				// Enter backoff state
+				is_transmitting = false;
+				initiate_backoff = true;
+			}
+
 		}
 	}
 
@@ -650,7 +657,7 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 		// For monitoring TX vs Backoffs
 		//HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_SET);
 
-		// If we are in the last one, we need to pull back high
+		// If we are at the end of a TX, we need to pull back high
 		if (pull_to_idle == true) {
 			HAL_GPIO_WritePin(TX_GPIO_Port, TX_Pin, GPIO_PIN_SET);
 
@@ -662,17 +669,18 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 
 			// Collision check done in channel monitor ISR
 			if (state == COL) {
-				if (num_backoffs == 0) {
-					start_time = HAL_GetTick();
-				}
-				HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_SET);
-				HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_3);
+//				if (num_backoffs == 0) {
+//					start_time = HAL_GetTick();
+//				}
+				//HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_SET);
+
 				// quit trying to re-transmit
 				if (num_backoffs == MAX_BACKOFFS) {
-					end_time = HAL_GetTick();
+					//end_time = HAL_GetTick();
 					tx_complete = true;
 					was_backoff = true;
 
+					// Reset transmit parameters
 					num_backoffs = 0;
 					tx_index = 0;
 					edge_count = 0;
@@ -680,10 +688,12 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 					is_transmitting = false;
 
 					HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_3);
-					// "clears" the TX buffer
-					tx_buffer[0] = '\0';
+					// clears the TX buffer
+					for (uint16_t i = 0; i < sizeof(tx_buffer); ++i) {
+					    	tx_buffer[i] = 0;
+					}
 
-					HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_RESET);
+					//HAL_GPIO_WritePin(ISR_GPIO_Port, ISR_Pin, GPIO_PIN_RESET);
 					return;
 				}
 
@@ -735,6 +745,7 @@ void HAL_TIM_OC_DelayElapsedCallback(TIM_HandleTypeDef* htim) {
 			// Pulled to logic high and we are fully done
 			edge_count = 0;
 			bit_index = 0;
+			tx_index = 0;
 
 			// Flag to main program to print that the message was successfully sent
 			tx_complete = true;
@@ -836,6 +847,11 @@ void print_new_data() {
     	received_message[i] = 0;
     }
     received_index = 0;
+
+    for (uint16_t i = 0; i < sizeof(tx_buffer); ++i) {
+    	tx_buffer[i] = 0;
+    }
+    tx_index = 0;
 }
 
 void schedule_backoff() {
@@ -845,6 +861,7 @@ void schedule_backoff() {
 	uint32_t w = (N / ((float)NMAX)) * ONE_SEC_TO_USEC;
 
 	// schedule TX for w microseconds later
+	HAL_TIM_OC_Stop_IT(&htim1, TIM_CHANNEL_3);
 	__HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3,
 					__HAL_TIM_GET_COUNTER(&htim1) + w);
 	HAL_TIM_OC_Start_IT(&htim1, TIM_CHANNEL_3);
@@ -894,12 +911,15 @@ void strip_newline(char *str) {
 void decode_bit(uint32_t pulse_width, bool initial_bit) {
 
 	// Store received bit in buffer
-	static uint8_t bit_counter = 0;
-	static uint8_t byte_buffer = 0;
-	static uint8_t one_t_counter = 0;
+//	static uint8_t bit_counter = 0;
+//	static uint8_t byte_buffer = 0;
+//	static uint8_t one_t_counter = 0;
 
 	// Start from known 0 after IDLE (true because of preamble)
 	if (initial_bit == true) {
+		bit_counter = 0;
+		byte_buffer = 0;
+		one_t_counter = 0;
 		bit_state = 0;
 		// Shift byte to the left and append bit at LSB
 		byte_buffer = ((byte_buffer << 1) | bit_state);
